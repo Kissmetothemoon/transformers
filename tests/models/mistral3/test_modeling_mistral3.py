@@ -316,6 +316,7 @@ class Mistral3IntegrationTest(unittest.TestCase):
 
     @require_deterministic_for_xpu
     def test_mistral3_integration_batched_generate(self):
+        # TODO(synthetic-assets): refresh expectations, recorded against the old third-party asset.
         processor = AutoProcessor.from_pretrained(self.model_checkpoint)
         processor.tokenizer.padding_side = "left"
         processor.chat_template = processor.chat_template.replace('strftime_now("%Y-%m-%d")', '"2025-06-20"')
@@ -326,7 +327,7 @@ class Mistral3IntegrationTest(unittest.TestCase):
                     "content": [
                         {
                             "type": "image",
-                            "url": "https://huggingface.co/ydshieh/mistral3-test-data/resolve/main/view.jpg",
+                            "url": "https://huggingface.co/datasets/hf-internal-testing/transformers-synthetic-assets/resolve/main/images/mistral3_view.jpg",
                         },
                         {"type": "text", "text": "Write a haiku for this image"},
                     ],
@@ -391,6 +392,7 @@ class Mistral3IntegrationTest(unittest.TestCase):
 
     @require_deterministic_for_xpu
     def test_mistral3_integration_batched_generate_multi_image(self):
+        # TODO(synthetic-assets): refresh expectations, recorded against the old third-party asset.
         processor = AutoProcessor.from_pretrained(self.model_checkpoint)
         processor.tokenizer.padding_side = "left"
         processor.chat_template = processor.chat_template.replace('strftime_now("%Y-%m-%d")', '"2025-06-20"')
@@ -403,7 +405,7 @@ class Mistral3IntegrationTest(unittest.TestCase):
                     "content": [
                         {
                             "type": "image",
-                            "url": "https://huggingface.co/ydshieh/mistral3-test-data/resolve/main/view.jpg",
+                            "url": "https://huggingface.co/datasets/hf-internal-testing/transformers-synthetic-assets/resolve/main/images/mistral3_view.jpg",
                         },
                         {"type": "text", "text": "Write a haiku for this image"},
                     ],
@@ -415,11 +417,11 @@ class Mistral3IntegrationTest(unittest.TestCase):
                     "content": [
                         {
                             "type": "image",
-                            "url": "https://huggingface.co/ydshieh/mistral3-test-data/resolve/main/Statue-of-Liberty-Island-New-York-Bay.jpg",
+                            "url": "https://huggingface.co/datasets/hf-internal-testing/transformers-synthetic-assets/resolve/main/images/mistral3_statue_of_liberty.jpg",
                         },
                         {
                             "type": "image",
-                            "url": "https://huggingface.co/ydshieh/mistral3-test-data/resolve/main/golden-gate-bridge-san-francisco-purple-flowers-california-echium-candicans-36805947.jpg",
+                            "url": "https://huggingface.co/datasets/hf-internal-testing/transformers-synthetic-assets/resolve/main/images/mistral3_golden_gate.jpg",
                         },
                         {
                             "type": "text",
