@@ -109,6 +109,7 @@ if is_torch_available():
         WatermarkDetector,
         WatermarkingConfig,
     )
+    from transformers.generation.asd import _asd_greedy_acceptance
     from transformers.generation.candidate_generator import (
         AssistedCandidateGenerator,
         AssistedCandidateGeneratorDifferentTokenizers,
@@ -3185,6 +3186,148 @@ class UtilsFunctionsTest(unittest.TestCase):
         p_prime = captured[0]
         self.assertTrue(torch.isfinite(p_prime).all())
         self.assertAlmostEqual(p_prime.sum().item(), 1.0, places=5)
+
+    def test_asd_zero_budget_equals_strict(self):
+        """Gold standard: `budget=0` must reproduce strict greedy verification token for token."""
+        # Draft tokens 1, 4, 8: positions 0-1 match the target argmax, position 2 does not
+        candidate_new_tokens = torch.tensor([[1, 4, 8]])
+        candidate_length = 3
+        selected_tokens = torch.tensor([[1, 4, 9, 5]])  # target argmax (last one is the bonus position)
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+                    [-10.0, -10.0, -10.0, -10.0, 10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, 10.0, -10.0, -10.0, -10.0, -10.0],
+                ]
+            ]
+        )
+        n_matches, relaxed_mask, step_regret = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 0.0, 0.0, 1.0, 2
+        )
+        # Strict formula from `_assisted_decoding`: keep candidates until the first argmax mismatch
+        n_strict = ((~(candidate_new_tokens == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
+        self.assertEqual(n_matches.item(), n_strict.item())
+        self.assertEqual(n_matches.item(), 2)
+        self.assertFalse(relaxed_mask.any().item())
+        self.assertEqual(step_regret, 0.0)
+
+    def test_asd_budget_deduction_hand_computed(self):
+        """Hand-computed budget charging: accept while cumulative regret fits the budget."""
+        # Target argmax is always token 9; draft tokens have known target logits:
+        # position 0: draft token 1 with logit 8.0 -> regret 10-8 = 2.0
+        # position 1: draft token 2 with logit 7.5 -> regret 2.5 (cumulative 4.5 > budget -> stop)
+        candidate_new_tokens = torch.tensor([[1, 2]])
+        candidate_length = 2
+        selected_tokens = torch.tensor([[9, 9, 9]])
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 8.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, 7.5, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                ]
+            ]
+        )
+        n_matches, relaxed_mask, step_regret = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 0.0, 4.0, 100.0, 5
+        )
+        self.assertEqual(n_matches.item(), 1)  # only the first (regret 2.0 <= 4.0) is accepted
+        self.assertEqual(relaxed_mask.tolist(), [[True, False]])
+        self.assertAlmostEqual(step_regret, 2.0)
+
+    def test_asd_suffix_value_weighting(self):
+        """The local gate `r_i / (K - i) <= g` rejects a low-regret token at a late position."""
+        # Same regret 2.0 at both positions, K=2: suffix values are 2 and 1.
+        # With g=1.5: position 0 passes (2.0/2 <= 1.5), position 1 fails (2.0/1 > 1.5).
+        candidate_new_tokens = torch.tensor([[1, 2]])
+        candidate_length = 2
+        selected_tokens = torch.tensor([[9, 9, 9]])
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 8.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, 8.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                ]
+            ]
+        )
+        n_matches, relaxed_mask, step_regret = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 0.0, 100.0, 1.5, 5
+        )
+        self.assertEqual(n_matches.item(), 1)
+        self.assertEqual(relaxed_mask.tolist(), [[True, False]])
+        self.assertAlmostEqual(step_regret, 2.0)
+
+    def test_asd_max_mismatches_cap(self):
+        """The per-block mismatch cap rejects the (m+1)-th relaxed token even with ample budget."""
+        # Two relaxed positions with tiny regret, but m=1 allows only one per block.
+        candidate_new_tokens = torch.tensor([[1, 2]])
+        candidate_length = 2
+        selected_tokens = torch.tensor([[9, 9, 9]])
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 9.5, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, 9.5, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                ]
+            ]
+        )
+        n_matches, relaxed_mask, _ = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 0.0, 100.0, 100.0, 1
+        )
+        self.assertEqual(n_matches.item(), 1)
+        self.assertEqual(relaxed_mask.tolist(), [[True, False]])
+
+    def test_asd_budget_carries_across_blocks(self):
+        """The request-level budget persists: regret spent in earlier blocks shrinks later allowance."""
+        candidate_new_tokens = torch.tensor([[1]])
+        candidate_length = 1
+        selected_tokens = torch.tensor([[9, 9]])
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 8.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                ]
+            ]
+        )
+        # regret_spent=1.5 from a previous block: 1.5 + 2.0 = 3.5 <= 4.0 -> accepted
+        n_matches, _, step_regret = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 1.5, 4.0, 100.0, 5
+        )
+        self.assertEqual(n_matches.item(), 1)
+        self.assertAlmostEqual(step_regret, 2.0)
+        # regret_spent=2.5: 2.5 + 2.0 = 4.5 > 4.0 -> rejected
+        n_matches, _, step_regret = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 2.5, 4.0, 100.0, 5
+        )
+        self.assertEqual(n_matches.item(), 0)
+        self.assertEqual(step_regret, 0.0)
+
+    def test_asd_relaxed_positions_commit_draft_tokens(self):
+        """Caller-side check: relaxed positions commit the DRAFT token, not the target argmax."""
+        candidate_new_tokens = torch.tensor([[1, 4]])
+        candidate_length = 2
+        selected_tokens = torch.tensor([[9, 4, 5]])
+        new_logits = torch.tensor(
+            [
+                [
+                    [-10.0, 8.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0, 10.0],
+                    [-10.0, -10.0, -10.0, -10.0, 10.0, -10.0, -10.0, -10.0, -10.0, -10.0],
+                    [-10.0, -10.0, -10.0, -10.0, -10.0, 10.0, -10.0, -10.0, -10.0, -10.0],
+                ]
+            ]
+        )
+        n_matches, relaxed_mask, _ = _asd_greedy_acceptance(
+            candidate_new_tokens, selected_tokens, new_logits, candidate_length, 0.0, 4.0, 100.0, 5
+        )
+        self.assertEqual(n_matches.item(), 2)  # position 0 relaxed, position 1 exact
+        committed = torch.where(relaxed_mask, candidate_new_tokens, selected_tokens[:, :-1])
+        valid_tokens = torch.cat([committed[:, :n_matches], selected_tokens[:, n_matches : n_matches + 1]], dim=-1)
+        self.assertEqual(valid_tokens.tolist(), [[1, 4, 5]])  # draft 1 (not argmax 9), then 4, then bonus 5
 
 
 global_rng = random.Random()

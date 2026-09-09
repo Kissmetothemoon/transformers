@@ -289,6 +289,53 @@ class GenerationConfigTest(unittest.TestCase):
         self.assertEqual(config_dict["assistant_ensemble_weight"], 0.7)
         self.assertEqual(GenerationConfig.from_dict(config_dict).assistant_ensemble_weight, 0.7)
 
+    def test_validate_assistant_asd(self):
+        """`assistant_asd_*` must be `None` (lossless) or a valid triple set together."""
+        # `None` (default) is valid
+        GenerationConfig().validate()
+        # A valid triple is accepted, including boundary values that recover strict verification
+        GenerationConfig(assistant_asd_budget=2.0, assistant_asd_local_ratio=0.25, assistant_asd_max_mismatches=2)
+        GenerationConfig(assistant_asd_budget=0.0, assistant_asd_local_ratio=0.0, assistant_asd_max_mismatches=0)
+        # Partial specification must raise
+        with self.assertRaises(ValueError):
+            GenerationConfig(assistant_asd_budget=2.0)
+        with self.assertRaises(ValueError):
+            GenerationConfig(assistant_asd_budget=2.0, assistant_asd_local_ratio=0.25)
+        # Out-of-range values must raise
+        with self.assertRaises(ValueError):
+            GenerationConfig(assistant_asd_budget=-1.0, assistant_asd_local_ratio=0.25, assistant_asd_max_mismatches=2)
+        with self.assertRaises(ValueError):
+            GenerationConfig(assistant_asd_budget=2.0, assistant_asd_local_ratio=-0.1, assistant_asd_max_mismatches=2)
+        with self.assertRaises(ValueError):
+            GenerationConfig(assistant_asd_budget=2.0, assistant_asd_local_ratio=0.25, assistant_asd_max_mismatches=-1)
+        # ASD is greedy-only
+        with self.assertRaises(ValueError):
+            GenerationConfig(
+                assistant_asd_budget=2.0,
+                assistant_asd_local_ratio=0.25,
+                assistant_asd_max_mismatches=2,
+                do_sample=True,
+            )
+
+    def test_assistant_asd_default_and_round_trip(self):
+        """Defaults are `None`; values round-trip through `to_dict`/`from_dict`."""
+        config = GenerationConfig()
+        self.assertIsNone(config.assistant_asd_budget)
+        self.assertIsNone(config.assistant_asd_local_ratio)
+        self.assertIsNone(config.assistant_asd_max_mismatches)
+
+        config = GenerationConfig(
+            assistant_asd_budget=2.0, assistant_asd_local_ratio=0.25, assistant_asd_max_mismatches=2
+        )
+        config_dict = config.to_dict()
+        self.assertEqual(config_dict["assistant_asd_budget"], 2.0)
+        self.assertEqual(config_dict["assistant_asd_local_ratio"], 0.25)
+        self.assertEqual(config_dict["assistant_asd_max_mismatches"], 2)
+        restored = GenerationConfig.from_dict(config_dict)
+        self.assertEqual(restored.assistant_asd_budget, 2.0)
+        self.assertEqual(restored.assistant_asd_local_ratio, 0.25)
+        self.assertEqual(restored.assistant_asd_max_mismatches, 2)
+
     def test_validate_sampling_flag_provenance(self):
         """
         Dedicated coverage for the provenance-aware warning rule on sampling-only flags:

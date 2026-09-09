@@ -357,6 +357,20 @@ class GenerationConfig(PushToHubMixin):
             `p_target`, trading a controlled distributional bias for a higher acceptance rate. Defaults
             to `None`, which keeps decoding lossless. Requires the assistant model to return logits, so it
             is not compatible with prompt lookup decoding.
+        assistant_asd_budget (`float`, *optional*):
+            Enables Approximate Speculative Decoding (ASD) acceptance in greedy speculative decoding
+            (https://arxiv.org/abs/2608.03447). A draft token is accepted when its local regret against the
+            target logits, `max_v z(v) - z(x_i)`, keeps the request-level cumulative regret within this
+            budget. Must be set together with `assistant_asd_local_ratio` and
+            `assistant_asd_max_mismatches`. Defaults to `None`, which keeps decoding lossless; a budget of
+            `0.0` exactly recovers strict greedy verification. Requires target logits over the candidate
+            sequence, so it is not compatible with prompt lookup decoding.
+        assistant_asd_local_ratio (`float`, *optional*):
+            Maximum allowed local regret per suffix value, `r_i / (K - i)`, for a draft token to be
+            accepted under ASD. Later draft positions get less slack.
+        assistant_asd_max_mismatches (`int`, *optional*):
+            Maximum number of relaxed (non-argmax) draft tokens accepted per candidate block under ASD.
+            `0` recovers strict greedy verification.
         speculation_type (`str`, *optional*):
             The requested speculation type. Accepted values are [`dflash`].
 
@@ -465,6 +479,9 @@ class GenerationConfig(PushToHubMixin):
         self.assistant_lookbehind = kwargs.pop("assistant_lookbehind", None)
         self.target_lookbehind = kwargs.pop("target_lookbehind", None)
         self.assistant_ensemble_weight = kwargs.pop("assistant_ensemble_weight", None)
+        self.assistant_asd_budget = kwargs.pop("assistant_asd_budget", None)
+        self.assistant_asd_local_ratio = kwargs.pop("assistant_asd_local_ratio", None)
+        self.assistant_asd_max_mismatches = kwargs.pop("assistant_asd_max_mismatches", None)
         self.speculation_type = kwargs.pop("speculation_type", None)
 
         # Performance
@@ -673,6 +690,29 @@ class GenerationConfig(PushToHubMixin):
                 f"`assistant_ensemble_weight` must be in the open interval `(0.0, 1.0)`, "
                 f"but is {self.assistant_ensemble_weight}. Use `None` for standard (lossless) speculative decoding."
             )
+        asd_params = (self.assistant_asd_budget, self.assistant_asd_local_ratio, self.assistant_asd_max_mismatches)
+        if any(param is not None for param in asd_params):
+            if not all(param is not None for param in asd_params):
+                raise ValueError(
+                    "`assistant_asd_budget`, `assistant_asd_local_ratio` and `assistant_asd_max_mismatches` "
+                    "must be set together, or all left as `None` for standard (lossless) speculative decoding."
+                )
+            if self.assistant_asd_budget < 0.0:
+                raise ValueError(f"`assistant_asd_budget` must be non-negative, but is {self.assistant_asd_budget}.")
+            if self.assistant_asd_local_ratio < 0.0:
+                raise ValueError(
+                    f"`assistant_asd_local_ratio` must be non-negative, but is {self.assistant_asd_local_ratio}."
+                )
+            if not isinstance(self.assistant_asd_max_mismatches, int) or self.assistant_asd_max_mismatches < 0:
+                raise ValueError(
+                    "`assistant_asd_max_mismatches` must be a non-negative integer, "
+                    f"but is {self.assistant_asd_max_mismatches}."
+                )
+            if self.do_sample:
+                raise ValueError(
+                    "ASD acceptance (`assistant_asd_*`) is only supported for greedy decoding, but "
+                    "`do_sample=True`. For the sampling path see `assistant_ensemble_weight` instead."
+                )
         if self.pad_token_id is not None and self.pad_token_id < 0:
             minor_issues["pad_token_id"] = (
                 f"`pad_token_id` should be positive but got {self.pad_token_id}. This will cause errors when batch "

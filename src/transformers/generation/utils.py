@@ -53,6 +53,7 @@ from ..utils import (
     logging,
 )
 from ..utils.generic import is_flash_attention_requested
+from .asd import _asd_greedy_acceptance
 from .candidate_generator import (
     AssistantVocabTranslatorCache,
     AssistedCandidateGenerator,
@@ -1152,6 +1153,11 @@ class GenerationMixin(ContinuousMixin):
                 raise ValueError(
                     "Setting `assistant_ensemble_weight` requires candidate logits from the assistant model. "
                     "It is not supported with prompt lookup decoding."
+                )
+            if generation_config.assistant_asd_budget is not None:
+                raise ValueError(
+                    "Setting `assistant_asd_budget` is not supported with prompt lookup decoding. "
+                    "Use an assistant model for ASD acceptance."
                 )
             candidate_generator = PromptLookupCandidateGenerator(
                 eos_token_id=generation_config._eos_token_tensor,
@@ -3835,6 +3841,7 @@ class GenerationMixin(ContinuousMixin):
         is_first_iteration = True  # to preserve the same API in the output as other generation methods
         outputs = None
         n_matches = 0
+        asd_regret_spent = 0.0  # request-level ASD cumulative regret, carried across iterations
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
             cur_len = input_ids.shape[1]
 
@@ -3932,12 +3939,36 @@ class GenerationMixin(ContinuousMixin):
                         selected_tokens = new_logits.argmax(dim=-1)
 
                 candidate_new_tokens = candidate_input_ids[:, cur_len:]
-                n_matches = ((~(candidate_new_tokens == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
+                if not do_sample and generation_config.assistant_asd_budget is not None:
+                    # Greedy ASD acceptance: relax the strict argmax comparison under a bounded per-request
+                    # regret budget. Relaxed positions commit the draft token; the first infeasible position
+                    # commits the target argmax as usual.
+                    n_matches, relaxed_mask, step_regret = _asd_greedy_acceptance(
+                        candidate_new_tokens,
+                        selected_tokens,
+                        new_logits,
+                        candidate_length,
+                        asd_regret_spent,
+                        generation_config.assistant_asd_budget,
+                        generation_config.assistant_asd_local_ratio,
+                        generation_config.assistant_asd_max_mismatches,
+                    )
+                    asd_regret_spent += step_regret
 
-                # Ensure we don't generate beyond max_len or an EOS token
-                if is_done_candidate and n_matches == candidate_length:
-                    n_matches -= 1
-                valid_tokens = selected_tokens[:, : n_matches + 1]
+                    # Ensure we don't generate beyond max_len or an EOS token
+                    if is_done_candidate and n_matches == candidate_length:
+                        n_matches -= 1
+                    committed = torch.where(relaxed_mask, candidate_new_tokens, selected_tokens[:, :-1])
+                    valid_tokens = torch.cat(
+                        [committed[:, :n_matches], selected_tokens[:, n_matches : n_matches + 1]], dim=-1
+                    )
+                else:
+                    n_matches = ((~(candidate_new_tokens == selected_tokens[:, :-1])).cumsum(dim=-1) < 1).sum()
+
+                    # Ensure we don't generate beyond max_len or an EOS token
+                    if is_done_candidate and n_matches == candidate_length:
+                        n_matches -= 1
+                    valid_tokens = selected_tokens[:, : n_matches + 1]
 
             # A partial acceptance plus the correction/bonus token can overshoot the length budget when the
             # candidate generator does not cap its drafts (e.g. MTP always drafts `num_mtp_layers` tokens)

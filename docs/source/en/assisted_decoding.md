@@ -200,6 +200,31 @@ tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
 This requires candidate logits from the assistant model and is not supported with prompt lookup decoding.
 
+### Approximate verification with ASD
+
+For *greedy* decoding, [Approximate Speculative Decoding (ASD)](https://arxiv.org/abs/2608.03447) relaxes strict argmax verification in a deterministic, explicitly bounded way. A draft token is accepted when its local regret against the target logits — the gap between the top target logit and the draft token's target logit — keeps the request-level cumulative regret within `assistant_asd_budget`. Two additional gates bound the relaxation per block: `assistant_asd_local_ratio` caps the per-token regret divided by its suffix value (later draft positions get less slack), and `assistant_asd_max_mismatches` caps the number of relaxed tokens per candidate block. Setting the budget (or the mismatch cap) to `0` recovers strict greedy verification exactly.
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-1.7B")
+model = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-1.7B", dtype="auto")
+assistant_model = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-135M", dtype="auto")
+inputs = tokenizer("Hugging Face is an open-source company", return_tensors="pt")
+
+outputs = model.generate(
+    **inputs,
+    assistant_model=assistant_model,
+    assistant_asd_budget=2.0,
+    assistant_asd_local_ratio=0.25,
+    assistant_asd_max_mismatches=2,
+)
+tokenizer.batch_decode(outputs, skip_special_tokens=True)
+```
+
+ASD is approximate decoding: the output may deviate from the target model's greedy output, with the deviation bounded by the configured budget. It requires target logits over the candidate sequence, so it is not supported with prompt lookup decoding, and it only applies to greedy decoding (`do_sample=False`).
+
 ## Resources
 
 - Read the [Assisted Generation: a new direction toward low-latency text generation](https://huggingface.co/blog/assisted-generation) blog post for more context about text generation latency and assisted generation.
